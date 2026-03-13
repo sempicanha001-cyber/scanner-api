@@ -1,43 +1,50 @@
-import os
 import jwt
 from supabase import create_client, Client
+from app.config import settings
 from fastapi import HTTPException, Security
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
-
-# Fast fail on missing critical SaaS credentials
-if not all([SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_JWT_SECRET]):
-    print("WARNING: Supabase SaaS environment variables are missing.")
-
-def get_supabase() -> Client:
-    """Returns the Supabase Service Role client to bypass RLS for internal server logic."""
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
+supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+supabase_admin: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
 security = HTTPBearer()
 
-def verify_supabase_jwt(credentials: HTTPAuthorizationCredentials = Security(security)):
-    """
-    Middleware to verify Supabase Auth tokens passed in requests.
-    Decodes the JWT using the project's secret and returns the user payload.
-    """
-    token = credentials.credentials
+def verify_supabase_jwt(auth: HTTPAuthorizationCredentials = Security(security)):
+    """Verifies the Supabase JWT and returns the user payload."""
     try:
-        # Supabase JWTs are typically encoded with HS256
         payload = jwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
+            auth.credentials,
+            settings.SUPABASE_JWT_SECRET,
             algorithms=["HS256"],
-            options={"verify_aud": False}  # Adjust audience verification as needed
+            audience="authenticated"
         )
         return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid auth token")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid authentication token: {str(e)}")
 
+class SupabaseService:
+    @staticmethod
+    async def create_scan(user_id: str, target: str, scan_type: str):
+        data = {
+            "user_id": user_id,
+            "target": target,
+            "status": "pending",
+            "scan_type": scan_type
+        }
+        res = supabase_admin.table("scans").insert(data).execute()
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    async def save_vulnerability(scan_id: str, vuln_data: dict):
+        res = supabase_admin.table("vulnerabilities").insert({
+            "scan_id": scan_id,
+            **vuln_data
+        }).execute()
+        return res.data
+
+    @staticmethod
+    async def get_user_scans(user_id: str):
+        res = supabase_admin.table("scans").select("*").eq("user_id", user_id).execute()
+        return res.data
+
+service = SupabaseService()

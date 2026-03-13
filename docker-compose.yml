@@ -42,8 +42,8 @@ services:
   # ── FastAPI (web layer) ────────────────────────────────────────────────────
   api:
     build:
-      context: ./app
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: app/Dockerfile
     restart: unless-stopped
     command: >
       gunicorn api:app
@@ -81,8 +81,8 @@ services:
   # ── Celery Worker ──────────────────────────────────────────────────────────
   worker:
     build:
-      context: ./app
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: app/Dockerfile
     restart: unless-stopped
     command: celery -A celery_app worker --loglevel=info --concurrency=4 -Q scans
     environment:
@@ -113,8 +113,8 @@ services:
   # Profile: "ai" — start with: docker compose --profile ai up -d
   ai-worker:
     build:
-      context: ./app
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: app/Dockerfile
     restart: unless-stopped
     command: celery -A celery_app worker --loglevel=info --concurrency=1 -Q ai -n ai-worker@%h
     environment:
@@ -161,8 +161,8 @@ services:
   # ── Celery Beat ────────────────────────────────────────────────────────────
   beat:
     build:
-      context: ./app
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: app/Dockerfile
     restart: unless-stopped
     command: celery -A celery_app beat --loglevel=info
     environment:
@@ -177,8 +177,8 @@ services:
   # ── Flower (Celery UI) ─────────────────────────────────────────────────────
   flower:
     build:
-      context: ./app
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: app/Dockerfile
     restart: unless-stopped
     command: >
       celery -A celery_app flower
