@@ -101,6 +101,7 @@ def run_scan(
     auth: Optional[str] = None,
     auth_attacker: Optional[str] = None,
     encrypt_result: bool = False,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute a full security scan.
@@ -192,6 +193,20 @@ def run_scan(
             "data": "completed",
             "result": result_dict,
         })
+        
+        # ── Supabase SaaS Persistence ───────────────────────────────────────
+        if user_id:
+            try:
+                from core.supabase import get_supabase
+                supabase = get_supabase()
+                supabase.table("scans").update({
+                    "status": "completed",
+                    "result_summary": result_dict.get("summary", {}),
+                    "completed_at": datetime.utcnow().isoformat() + "Z"
+                }).eq("id", scan_id).eq("user_id", user_id).execute()
+            except Exception as e:
+                logger.error(f"[{scan_id}] Supabase success sync error: {e}")
+
         logger.info(f"[{scan_id}] Scan completed. Findings: {len(findings_buffer)}")
 
         # ── Dispatch async AI analysis (non-blocking) ──────────────────────
@@ -205,6 +220,7 @@ def run_scan(
                     "findings": findings_buffer,
                     "target":   target,
                     "summary":  summary_for_ai,
+                    "user_id":  user_id,
                 },
                 queue="ai",
             )

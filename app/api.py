@@ -22,7 +22,20 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
+# Optional: starlette rate limiting for lightweight production usage
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
+
 load_dotenv()
+
+# Setup Rate Limiter
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+
+app = FastAPI(title="Vulnexus API Scanner", version="2.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 API_KEY   = os.getenv("SCANNER_API_KEY") or secrets.token_hex(16)
@@ -109,10 +122,15 @@ async def get_redis() -> aioredis.Redis:
     return _redis_pool
 
 
-async def verify_token(x_api_key: str = Header(...)):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-    return x_api_key
+from core.supabase import verify_supabase_jwt
+
+async def verify_token(payload: dict = Depends(verify_supabase_jwt)):
+    # The payload is authenticated using Supabase's JWT secret
+    # Extract the user_id (tenant) to isolate scans
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=403, detail="Invalid User Context")
+    return user_id
 
 
 class ScanRequest(BaseModel):
@@ -168,8 +186,8 @@ async def _scan_keys(r: aioredis.Redis, pattern: str) -> List[str]:
     return keys
 
 
-@app.post("/scans", dependencies=[Depends(verify_token)])
-async def start_scan(req: ScanRequest):
+@app.post("/scans", dependencies=[])
+async def start_scan(req: ScanRequest, user_id: str = Depends(verify_token)):
     from celery_app import run_scan
     scan_id = str(uuid.uuid4())[:8].upper()
     r = await get_redis()
@@ -177,13 +195,27 @@ async def start_scan(req: ScanRequest):
         "id": scan_id, "status": "queued", "target": req.target,
         "scan_type": req.scan_type, "queued_at": datetime.utcnow().isoformat() + "Z",
         "findings": "[]", "result": "null", "error": "null", "celery_task_id": "pending",
+        "user_id": user_id  # Multi-tenant isolation binding
     })
     await r.expire(f"scan_state:{scan_id}", 3600)
+    
+    # Supabase persistent sync example (Fires asynchronously into the worker)
+    # The worker will update the remote DB, but we initialize it in the DB immediately.
+    try:
+        from core.supabase import get_supabase
+        supabase = get_supabase()
+        supabase.table("scans").insert({
+            "id": scan_id, "user_id": user_id, "target": req.target,
+            "status": "queued", "scan_type": req.scan_type
+        }).execute()
+    except Exception as e:
+        print(f"Supabase sync err (queued state): {e}")
+
     task = run_scan.apply_async(
         kwargs={
             "scan_id": scan_id, "target": req.target, "scan_type": req.scan_type,
             "threads": req.threads, "auth": req.auth, "auth_attacker": req.auth_attacker,
-            "encrypt_result": req.encrypt_result,
+            "encrypt_result": req.encrypt_result, "user_id": user_id
         },
         task_id=f"scan-{scan_id}",
         queue="scans",
@@ -192,14 +224,14 @@ async def start_scan(req: ScanRequest):
     return {"scan_id": scan_id, "status": "queued", "target": req.target, "celery_task_id": task.id}
 
 
-@app.get("/scans/{scan_id}", dependencies=[Depends(verify_token)])
-async def get_scan(scan_id: str):
+@app.get("/scans/{scan_id}", dependencies=[])
+async def get_scan(scan_id: str, user_id: str = Depends(verify_token)):
     # FIX #7: Validate scan_id format to prevent Redis key injection
     if not _SCAN_ID_RE.match(scan_id):
         raise HTTPException(status_code=400, detail="Invalid scan_id format")
     r = await get_redis()
     state = await _get_scan_state(r, scan_id)
-    if not state:
+    if not state or state.get("user_id") != user_id:
         raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
     return state
 
@@ -223,8 +255,8 @@ async def cancel_scan(scan_id: str):
     return {"scan_id": scan_id, "status": "cancelled"}
 
 
-@app.get("/scans", dependencies=[Depends(verify_token)])
-async def list_scans():
+@app.get("/scans", dependencies=[])
+async def list_scans(user_id: str = Depends(verify_token)):
     r = await get_redis()
     # FIX: Use non-blocking SCAN cursor instead of KEYS
     keys = await _scan_keys(r, "scan_state:*")
@@ -232,7 +264,8 @@ async def list_scans():
     for key in keys:
         sid = key.replace("scan_state:", "")
         state = await _get_scan_state(r, sid)
-        if state:
+        # Ensure multi-tenant isolation
+        if state and state.get("user_id") == user_id:
             scans.append({
                 "id": state.get("id", sid),
                 "target": state.get("target", ""),
