@@ -1,0 +1,269 @@
+version: "3.9"
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+#   frontend_net : publicly exposed (Nginx, Grafana proxy, Flower proxy)
+#   internal_net : private — Redis, Prometheus, exporters never directly exposed
+#
+# NOTE: internal_net does NOT use internal:true so that Celery workers can
+#       reach external scan targets (APIs on the internet). Redis/Prometheus
+#       are isolated by not being on frontend_net.
+networks:
+  frontend_net:
+    driver: bridge
+  internal_net:
+    driver: bridge
+    # ⚠️  intentionally NOT internal:true — workers must reach external URLs
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  redis_data:
+  scan_reports:
+  scan_logs:
+  prometheus_data:
+  grafana_data:
+  ollama_models:
+
+services:
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1
+    networks: [internal_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
+  # ── FastAPI (web layer) ────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      gunicorn api:app
+      -k uvicorn.workers.UvicornWorker
+      --workers 2
+      --bind 0.0.0.0:8000
+      --timeout 120
+      --graceful-timeout 30
+      --keep-alive 5
+      --access-logfile -
+      --error-logfile -
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCANNER_API_KEY=${SCANNER_API_KEY:-dev-secret-key}
+      - MAX_CONCURRENCY=20
+      - SCAN_TIMEOUT=10
+      - ALLOW_PRIVATE=false
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    networks: [frontend_net, internal_net]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - scan_reports:/app/reports
+      - scan_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose: ["8000"]
+
+  # ── Celery Worker ──────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: celery -A celery_app worker --loglevel=info --concurrency=4 -Q scans
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCANNER_API_KEY=${SCANNER_API_KEY:-dev-secret-key}
+      - MAX_CONCURRENCY=20
+      - SCAN_TIMEOUT=10
+      - ALLOW_PRIVATE=false
+    networks: [internal_net]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - scan_reports:/app/reports
+      - scan_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "celery", "-A", "celery_app", "inspect", "ping", "--timeout=5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── AI Worker (Celery — runs AI analysis tasks via Ollama) ────────────────
+  # Separate from scan workers so AI tasks never block security scanning.
+  # Connects to Ollama running on the HOST machine (host.docker.internal).
+  # Profile: "ai" — start with: docker compose --profile ai up -d
+  ai-worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: celery -A celery_app worker --loglevel=info --concurrency=1 -Q ai -n ai-worker@%h
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      # Point to Ollama on the host machine
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
+      - OLLAMA_MAX_TOKENS=${OLLAMA_MAX_TOKENS:-1024}
+    networks: [internal_net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # allows container to reach host Ollama
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - scan_reports:/app/reports
+    profiles: ["ai"]
+
+  # ── Ollama (local LLM server — OPTIONAL managed container) ────────────────
+  # Alternative: install Ollama directly on host and skip this container.
+  # This managed container is convenient but requires GPU passthrough for speed.
+  # Profile: "ollama" — start with: docker compose --profile ollama up -d
+  # After starting: docker compose exec ollama ollama pull llama3
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    networks: [internal_net]
+    volumes:
+      - ollama_models:/root/.ollama
+    expose: ["11434"]
+    # GPU support (uncomment for NVIDIA GPU acceleration):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    profiles: ["ollama"]
+
+  # ── Celery Beat ────────────────────────────────────────────────────────────
+  beat:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: celery -A celery_app beat --loglevel=info
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+    networks: [internal_net]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Flower (Celery UI) ─────────────────────────────────────────────────────
+  flower:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      celery -A celery_app flower
+      --port=5555
+      --url-prefix=flower
+      --enable_events
+      --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    networks: [frontend_net, internal_net]
+    depends_on:
+      worker:
+        condition: service_healthy
+    expose: ["5555"]
+
+  # ── Redis Exporter ─────────────────────────────────────────────────────────
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    restart: unless-stopped
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    networks: [internal_net]
+    depends_on:
+      redis:
+        condition: service_healthy
+    expose: ["9121"]
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    networks: [internal_net]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    expose: ["9090"]
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    networks: [frontend_net, internal_net]
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Nginx (reverse proxy + TLS) ────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [frontend_net]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+      flower:
+        condition: service_started

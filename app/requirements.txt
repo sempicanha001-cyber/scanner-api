@@ -1,0 +1,29 @@
+# Core HTTP
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Async / ASGI
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+gunicorn>=22.0.0
+websockets>=12.0
+
+# Task queue
+celery>=5.3.6
+redis>=5.0.3
+flower>=2.0.1
+
+# Utilities
+python-dotenv>=1.0.1
+cryptography>=42.0.4
+colorama>=0.4.6
+aiofiles>=23.2.1
+fpdf2>=2.7.9
+jinja2>=3.1.3
+PyJWT>=2.8.0
+
+# Prometheus metrics (required for Flower /metrics endpoint)
+prometheus-client>=0.20.0
+
+# AI / Ollama client (local LLM — no cloud APIs)
+# requests is already listed above; no additional packages needed for Ollama HTTP calls

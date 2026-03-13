@@ -1,0 +1,92 @@
+{
+  "title": "API Security Scanner",
+  "uid": "scanner-main",
+  "refresh": "15s",
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Scans",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "scanner_active_scans", "datasource": "Prometheus"}],
+      "options": {"colorMode": "background", "graphMode": "area"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Scans by Status",
+      "gridPos": {"x": 4, "y": 0, "w": 8, "h": 4},
+      "targets": [
+        {"expr": "scanner_scans_by_status{status=\"completed\"}", "legendFormat": "Completed", "datasource": "Prometheus"},
+        {"expr": "scanner_scans_by_status{status=\"failed\"}", "legendFormat": "Failed", "datasource": "Prometheus"},
+        {"expr": "scanner_scans_by_status{status=\"running\"}", "legendFormat": "Running", "datasource": "Prometheus"}
+      ],
+      "options": {"colorMode": "value", "graphMode": "none"}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Redis Memory (MB)",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "redis_memory_used_bytes / 1024 / 1024", "legendFormat": "Used MB", "datasource": "Prometheus"}],
+      "options": {"unit": "short"}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Redis Up",
+      "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "scanner_redis_up", "datasource": "Prometheus"}],
+      "options": {"colorMode": "background"}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Redis Connected Clients",
+      "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "redis_connected_clients", "datasource": "Prometheus"}],
+      "options": {"colorMode": "value"}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Redis Ops/sec",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [{"expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "ops/sec", "datasource": "Prometheus"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Redis Memory Over Time",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "redis_memory_used_bytes / 1024 / 1024", "legendFormat": "Used MB", "datasource": "Prometheus"},
+        {"expr": "redis_mem_fragmentation_ratio", "legendFormat": "Fragmentation Ratio", "datasource": "Prometheus"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Active Scans Over Time",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "scanner_active_scans", "legendFormat": "Active Scans", "datasource": "Prometheus"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Scans Completed vs Failed (cumulative)",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "scanner_scans_by_status{status=\"completed\"}", "legendFormat": "Completed", "datasource": "Prometheus"},
+        {"expr": "scanner_scans_by_status{status=\"failed\"}", "legendFormat": "Failed", "datasource": "Prometheus"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    }
+  ]
+}
